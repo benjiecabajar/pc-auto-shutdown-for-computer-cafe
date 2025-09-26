@@ -1,5 +1,7 @@
 {
-    "pin": "9999",
-    "message": "ILIHOK ANG MOUSE OR TOPLOKA ANG KEYBOARD PARA DILI MA PALONG! BY: BENJIE CABAJAR",
-    "timeout": 10
+    "pin": "1212",
+    "message": "pastilan",
+    "timeout": 10,
+    "startup_enabled": false,
+    "noise_detector_enabled": false
 }

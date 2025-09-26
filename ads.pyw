@@ -4,13 +4,16 @@ from customtkinter import *
 import os
 import time
 import json
+import sys                    # required for startup shortcut target detection
 from pynput import mouse, keyboard
 
-CONFIG_FILE = "autoshuwdown_config.json"
+# store config in AppData to avoid permission issues
+CONFIG_FILE = os.path.join(os.getenv("APPDATA", ""), "AutoShutdown", "autoshuwdown_config.json")
+os.makedirs(os.path.dirname(CONFIG_FILE), exist_ok=True)
 
-message_storage = {"default": "ILIHOK ANG MOUSE OR TOPLOKA ANG KEYBOARD PA~RA DILI MA PALONG!   BY: OWNER"}
-pin_storage = {"main": "1234", "lock": "1234"}
-time_storage = {"shutdown": 10}
+message_storage = {"default": "Welcome! Thank you for using Auto Shutdown. You can change this message in the settings anytime. The Default PIN is 0000"}
+pin_storage = {"main": "0000", "lock": "1234"}
+time_storage = {"shutdown": 20}
 startup_state = {"enabled": False}
 noise_detector_state = {"enabled": False}
 
@@ -20,9 +23,14 @@ window_height = 320
 class AutoShutdownApp:
     def __init__(self, ui):
         self.ui = ui
+
+        # load settings first so UI switches/loaders read the saved values
+        self.load_settings()
+
+        # build UI (kept identical to your design)
         self.center_window(460, 315)
         self.ui.title("AutoShutdown")
-        self.ui.attributes("-alpha", 0.96) 
+        self.ui.attributes("-alpha", 0.96)
         self.ui.overrideredirect(True)
         self.ui.resizable(0, 0)
         self.ui.configure(background='#242424')
@@ -30,51 +38,116 @@ class AutoShutdownApp:
         self.info_text = message_storage["default"]
         self.shutdown_time_ms = time_storage["shutdown"] * 60 * 1000
         self.last_activity_time = time.time()
+
+        # Prepare frames (persistent)
+        self.main_frame = None
+        self.login_frame = None
+        self.settings_frame = None
+
+        # Build UI (creates frames and widgets)
         self.create_main_ui()
+        self.login_ui()
+        self.settings_ui()
+
+        # Show main frame initially
+        self.show_frame(self.main_frame)
+
+        # Drag handling
         self.drag_data = {'x': 0, 'y': 0}
         self.ui.bind("<ButtonPress-1>", self.start_drag)
         self.ui.bind("<B1-Motion>", self.do_drag)
-        self.load_settings()
-        self.startup_var = BooleanVar(value=startup_state.get("enabled", False))
+
+        # Initialize runtime flags from loaded config
+        self.startup_var.set(startup_state.get("enabled", False))
         self.noise_prevention_active = noise_detector_state.get("enabled", False)
+
+        # Start listeners
         self.start_listeners()
 
     def start_listeners(self):
-        self.ui.bind("<Motion>", self.update_activity_time)
+        # Use pynput global listeners so moving outside the window still resets timer
         self.mouse_listener = mouse.Listener(
-            on_move=self.update_activity_time,
-            on_click=self.update_activity_time,
-            on_scroll=self.update_activity_time
+            on_move=lambda *a: self.update_activity_time(),
+            on_click=lambda *a: self.update_activity_time(),
+            on_scroll=lambda *a: self.update_activity_time()
         )
-        self.keyboard_listener = keyboard.Listener(on_press=self.update_activity_time)
+        self.keyboard_listener = keyboard.Listener(
+            on_press=lambda *a: self.update_activity_time()
+        )
         self.mouse_listener.start()
         self.keyboard_listener.start()
         self.check_if_active()
 
+    def update_activity_time(self, *args, **kwargs):
+        now = time.time()
+        if now - self.last_activity_time > 0.5:  # only reset every 0.5s
+            self.last_activity_time = now
+            self.update_time_label()
+
+
     def load_settings(self):
+        """
+        Loads config from CONFIG_FILE. If file doesn't exist, creates one with defaults.
+        Saved keys:
+          - pin
+          - message
+          - timeout
+          - startup_enabled
+          - noise_detector_enabled
+        """
         try:
-            if os.path.exists(CONFIG_FILE):
-                with open(CONFIG_FILE, 'r') as f:
-                    config = json.load(f)
-                    pin_storage["main"] = config.get("pin", "0000")
-                    message_storage["default"] = config.get("message", self.info_text)
-                    time_storage["shutdown"] = config.get("timeout", 10)
-                    startup_state["enabled"] = config.get("startup_enabled", False)
-                    noise_detector_state["enabled"] = config.get("noise_detector_enabled", False)
+            if not os.path.exists(CONFIG_FILE):
+                # create default config on first run
+                default_config = {
+                    "pin": pin_storage["main"],
+                    "message": message_storage["default"],
+                    "timeout": time_storage["shutdown"],
+                    "startup_enabled": startup_state["enabled"],
+                    "noise_detector_enabled": noise_detector_state["enabled"]
+                }
+                with open(CONFIG_FILE, 'w') as f:
+                    json.dump(default_config, f, indent=4)
+                # keep in-memory defaults, don't return early (we'll pick them up below)
+            with open(CONFIG_FILE, 'r') as f:
+                config = json.load(f)
+                pin_storage["main"] = config.get("pin", "0000")
+                message_storage["default"] = config.get("message", self.info_text if hasattr(self, "info_text") else message_storage["default"])
+                time_storage["shutdown"] = config.get("timeout", 10)
+                startup_state["enabled"] = config.get("startup_enabled", False)
+                noise_detector_state["enabled"] = config.get("noise_detector_enabled", False)
+
+                # apply loaded values to runtime if UI exists already
+                self.info_text = message_storage["default"]
+                self.shutdown_time_ms = time_storage["shutdown"] * 60 * 1000
+                # update UI fields if they are created later (UI creation uses startup_state when building)
         except Exception as e:
             print(f"Error loading config: {e}")
 
     def save_settings(self):
+        # protect if widgets do not yet exist
+        pin_val = getattr(self, "entry_newpin", None)
+        msg_widget = getattr(self, "new_info_label", None)
+        time_widget = getattr(self, "entry_newtime", None)
+
         config = {
-            "pin": pin_storage["main"],
-            "message": message_storage["default"],
-            "timeout": time_storage["shutdown"],
-            "startup_enabled": self.startup_var.get() if hasattr(self, 'startup_var') else startup_state["enabled"],
-            "noise_detector_enabled": self.noise_prevention_active if hasattr(self, 'noise_prevention_active') else noise_detector_state["enabled"]
+            "pin": pin_val.get() if pin_val else pin_storage["main"],
+            "message": msg_widget.get("1.0", "end").strip() if msg_widget else message_storage["default"],
+            "timeout": int(time_widget.get()) if time_widget and time_widget.get().isdigit() else time_storage["shutdown"],
+            "startup_enabled": self.startup_var.get() if hasattr(self, 'startup_var') else startup_state.get("enabled", False),
+            "noise_detector_enabled": getattr(self, 'noise_prevention_active', False)
         }
+
         try:
             with open(CONFIG_FILE, 'w') as f:
                 json.dump(config, f, indent=4)
+
+            # Hide file after saving (windows). If not windows, just ignore.
+            if os.name == 'nt' and os.path.exists(CONFIG_FILE):
+                try:
+                    os.system(f'attrib +h "{CONFIG_FILE}"')
+                except Exception as e:
+                    print(f"Failed to hide config file: {e}")
+
         except Exception as e:
             print(f"Error saving config: {e}")
 
@@ -84,6 +157,14 @@ class AutoShutdownApp:
         x_pos = (screen_width // 2) - (width // 2)
         y_pos = (screen_height // 2) - (height // 2)
         self.ui.geometry(f"{width}x{height}+{x_pos}+{y_pos}")
+
+    def show_frame(self, frame):
+        # Hide all frames and show only the requested one
+        for f in (self.main_frame, self.login_frame, self.settings_frame):
+            if f is not None:
+                f.pack_forget()
+        if frame is not None:
+            frame.pack(fill="both", expand=True)
 
     def start_drag(self, event):
         self.drag_data['x'] = event.x
@@ -96,64 +177,69 @@ class AutoShutdownApp:
         new_y = self.ui.winfo_y() + dy
         self.ui.geometry(f"+{new_x}+{new_y}")
 
-    def info_txt(self):
-        self.info_label = Text(self.ui, font=("Courier", 14,"bold"), bg="#242424", 
-                            fg="white", width=35, height=5, wrap="word", state="normal")
-        self.info_label.place(x=window_width // 2 - 195, y=167)
-        self.info_label.insert("1.0", self.info_text)
-        self.info_label.config(state="disabled")  
-
     def create_main_ui(self):
-        self.center_window(window_width, window_height)
-        self.time_label = Label(self.ui, text="", font=("Segoe UI", 60, "bold"),
+        # Create persistent main frame
+        self.main_frame = CTkFrame(self.ui, fg_color="#242424")
+
+        self.time_label = Label(self.main_frame, text="", font=("Segoe UI", 60, "bold"),
                               fg="#28a745", bg="#242424", borderwidth=2)
         self.time_label.place(x=window_width // 2 - 100, y=25)
 
-        self.label = Label(self.ui, text="\n ATTENTION", font=("Segoe UI", 14,"bold"), 
+        self.label = Label(self.main_frame, text="\n ATTENTION", font=("Segoe UI", 14,"bold"),
                          fg="white", bg="#242424")
         self.label.place(x=window_width // 2 - 60, y=-11)
 
-        self.lbl = Label(self.ui, text="Time Remaining Until Shutdown.", 
+        self.lbl = Label(self.main_frame, text="Time Remaining Until Shutdown.",
                         font=("Segoe UI", 14, "bold"), fg="#28a745", bg="#242424")
         self.lbl.place(x=window_width // 2 - 140, y=125)
 
-        self.info_txt()
+        self.info_label = Text(
+            self.main_frame,
+            font=("Courier", 14, "bold"),
+            bg="#242424",
+            fg="white",
+            width=35,
+            height=5,
+            wrap="word",
+            state="normal"
+        )
+        self.info_label.place(x=window_width // 2 - 195, y=167)
 
-        self.btn = CTkButton(self.ui, text="🛠", font=("Times", 25),
+        # Create a center tag
+        self.info_label.tag_configure("center", justify="center")
+
+        # Insert text with the "center" tag
+        self.info_label.insert("1.0", self.info_text, "center")
+
+        # Disable editing
+        self.info_label.config(state="disabled")
+
+        self.btn = CTkButton(self.main_frame, text="🛠", font=("Times", 25),
                            fg_color="#28a745", text_color="white",
                            hover_color="#218838", height=8, width=15,
-                           corner_radius=18, command=self.login_ui)
+                           corner_radius=18, command=lambda: self.show_frame(self.login_frame))
         self.btn.place(x=window_width - 50, y=10)
 
-        self.footer_label = Label(self.ui, text="Smart Shutdown - v1.6", 
+        self.footer_label = Label(self.main_frame, text="Smart Shutdown - v1.6",
                                 font=("Segoe UI", 8), fg="white", bg="#242424")
-        self.footer_label.place(x=10, y=300 - 14) 
+        self.footer_label.place(x=10, y=300 - 14)
 
-        self.footer_label1 = Label(self.ui, text="Developed by: BenjieCabajar", 
+        self.footer_label1 = Label(self.main_frame, text="Developed by: BenjieCabajar",
                                  font=("Segoe UI", 8), fg="white", bg="#242424")
         self.footer_label1.place(x=292, y=300 - 14)
 
-
     def login_ui(self):
-        for widget in self.ui.winfo_children():
-            widget.destroy()
-        self.center_window(window_width, window_height)
-
-        login_frame = CTkFrame(
-            self.ui,
-            corner_radius=0,  
-            fg_color="transparent"  
-        )
-        login_frame.pack(expand=True, pady=40, padx=40)
+        # Create persistent login frame
+        self.login_frame = CTkFrame(self.ui, fg_color="#242424")
 
         CTkLabel(
-            login_frame,
+            self.login_frame,
             text="🔒 Enter PIN to Continue",
             font=("Segoe UI", 20, "bold")
-        ).pack(pady=(20, 10))
+        ).pack(pady=(90, 5))
 
         self.pin_input = CTkEntry(
-            login_frame,
+            self.login_frame,
             font=("Segoe UI", 16),
             width=220,
             justify="center",
@@ -163,7 +249,7 @@ class AutoShutdownApp:
         self.pin_input.pack(pady=(5, 20))
         self.pin_input.bind("<Return>", lambda event: self.check_pin())
 
-        btn_frame = CTkFrame(login_frame, fg_color="transparent")
+        btn_frame = CTkFrame(self.login_frame, fg_color="transparent")
         btn_frame.pack(pady=10)
 
         CTkButton(
@@ -173,7 +259,7 @@ class AutoShutdownApp:
             fg_color="#6c757d",
             hover_color="#5a6268",
             width=100,
-            command=self.main_ui
+            command=lambda: self.show_frame(self.main_frame)
         ).pack(side="left", padx=5)
 
         CTkButton(
@@ -186,16 +272,12 @@ class AutoShutdownApp:
             command=self.check_pin
         ).pack(side="left", padx=5)
 
-        self.pin_timer = self.ui.after(10000, self.main_ui)
-
-
     def settings_ui(self):
-        for widget in self.ui.winfo_children():
-            widget.destroy()
-        self.center_window(window_width, window_height)
+        # Create persistent settings frame
+        self.settings_frame = CTkFrame(self.ui, fg_color="#242424")
 
         self.settings_label = CTkLabel(
-            self.ui,
+            self.settings_frame,
             text="Settings",
             font=("Segoe UI", 26, "bold"),
             text_color="#28a745",
@@ -207,23 +289,24 @@ class AutoShutdownApp:
         info_entry_width = 400
         button_width = 80
 
-        CTkLabel(self.ui, text="Change PIN", font=("Segoe UI", 14, "bold"), text_color="#cccccc", fg_color="#242424").place(x=window_width // 2 - entry_width // 2, y=55)
-        self.entry_newpin = CTkEntry(self.ui, placeholder_text="Enter new PIN", width=entry_width, justify="center", font=("Segoe UI", 14), height=20)
+        CTkLabel(self.settings_frame, text="Change PIN", font=("Segoe UI", 14, "bold"), text_color="#cccccc", fg_color="#242424").place(x=window_width // 2 - entry_width // 2, y=55)
+        self.entry_newpin = CTkEntry(self.settings_frame, placeholder_text="Enter new PIN", width=entry_width, justify="center", font=("Segoe UI", 14), height=20)
         self.entry_newpin.insert(0, pin_storage["main"])
         self.entry_newpin.place(x=window_width // 2 - entry_width // 2, y=80)
 
-        CTkLabel(self.ui, text="Shutdown Timeout (minutes)", font=("Segoe UI", 14, "bold"), text_color="#cccccc", fg_color="#242424").place(x=window_width // 2 - entry_width // 2, y=115)
-        self.entry_newtime = CTkEntry(self.ui, placeholder_text="Enter time in minutes", width=entry_width, justify="center", font=("Segoe UI", 14), height=20)
+        CTkLabel(self.settings_frame, text="Shutdown Timeout (minutes)", font=("Segoe UI", 14, "bold"), text_color="#cccccc", fg_color="#242424").place(x=window_width // 2 - entry_width // 2, y=115)
+        self.entry_newtime = CTkEntry(self.settings_frame, placeholder_text="Enter time in minutes", width=entry_width, justify="center", font=("Segoe UI", 14), height=20)
         self.entry_newtime.insert(0, str(time_storage["shutdown"]))
         self.entry_newtime.place(x=window_width // 2 - entry_width // 2, y=140)
 
-        CTkLabel(self.ui, text="Custom Message", font=("Segoe UI", 14, "bold"), text_color="#cccccc", fg_color="#242424").place(x=window_width // 2 - entry_width // 2, y=175)
-        self.new_info_label = CTkTextbox(self.ui, font=("Segoe UI", 14), width=info_entry_width, height=60, fg_color="#181818", text_color="white")
+        CTkLabel(self.settings_frame, text="Custom Message", font=("Segoe UI", 14, "bold"), text_color="#cccccc", fg_color="#242424").place(x=window_width // 2 - entry_width // 2, y=175)
+        self.new_info_label = CTkTextbox(self.settings_frame, font=("Segoe UI", 14), width=info_entry_width, height=60, fg_color="#181818", text_color="white")
         self.new_info_label.place(x=window_width // 2 - info_entry_width // 2, y=200)
         self.new_info_label.insert("1.0", message_storage["default"])
 
-        self.startup_var = BooleanVar(value=False)
-        self.startup_switch = CTkSwitch(self.ui, text="Start with Windows", variable=self.startup_var, font=("Segoe UI", 13), onvalue=True, offvalue=False, fg_color="red", progress_color="#218838", button_color="#fff", button_hover_color="#28a745", text_color="white", command=self.toggle_startup)
+        # Startup switch now loads its initial value from startup_state
+        self.startup_var = BooleanVar(value=startup_state.get("enabled", False))
+        self.startup_switch = CTkSwitch(self.settings_frame, text="Start with Windows", variable=self.startup_var, font=("Segoe UI", 13), onvalue=True, offvalue=False, fg_color="red", progress_color="#218838", button_color="#fff", button_hover_color="#28a745", text_color="white", command=self.toggle_startup)
         self.startup_switch.place(x=window_width // 2 - 90, y=275)
 
         def save():
@@ -253,11 +336,23 @@ class AutoShutdownApp:
             time_storage["shutdown"] = time_value
             self.shutdown_time_ms = time_value * 60 * 1000
             self.info_text = new_info
-            self.save_settings()
+            self.load_settings()
 
-            for widget in self.ui.winfo_children():
-                widget.destroy()
-            self.create_main_ui()
+            # update main UI widgets (no destroying)
+            if getattr(self, "info_label", None):
+                self.info_label.config(state="normal")
+                self.info_label.delete("1.0", "end")
+                self.info_label.insert("1.0", self.info_text, "center")
+                self.info_label.config(state="disabled")
+            if getattr(self, "entry_newtime", None):
+                self.entry_newtime.delete(0, "end")
+                self.entry_newtime.insert(0, str(time_storage["shutdown"]))
+            if getattr(self, "entry_newpin", None):
+                self.entry_newpin.delete(0, "end")
+                self.entry_newpin.insert(0, pin_storage["main"])
+
+            # go back to main frame
+            self.show_frame(self.main_frame)
             self.check_if_active()
             messagebox.showinfo("Success", "Settings saved successfully")
 
@@ -265,8 +360,7 @@ class AutoShutdownApp:
             import webbrowser
             webbrowser.open("https://www.facebook.com/bnje.23")
 
-
-        self.feedback_button = CTkButton(self.ui, text="📩",
+        self.feedback_button = CTkButton(self.settings_frame, text="📩",
             font=("Segoe UI", 15, "bold"), fg_color="blue",
             text_color="white", hover_color="darkblue",
             height=25, width=7,
@@ -274,48 +368,79 @@ class AutoShutdownApp:
         self.feedback_button.place(x=820 // 2 - button_width // 2, y=275)
 
         def open_update_link():
-            messagebox.showinfo("Your system is up to date!")
+            import webbrowser
+            import requests
 
-        self.update_button = CTkButton(self.ui, text="🔄",
+            # 👉 Your GitHub repo
+            GITHUB_USER = "benjiecabajar"
+            GITHUB_REPO = "pc-auto-shutdown-for-computer-cafe"
+            BRANCH = "main"
+
+            local_version = "1.6"  # update this when you release new versions
+
+            try:
+                url = f"https://api.github.com/repos/{GITHUB_USER}/{GITHUB_REPO}/releases/latest"
+                response = requests.get(url, timeout=5)
+                if response.status_code == 200:
+                    latest_release = response.json()
+                    latest_version = latest_release.get("tag_name", "")
+                    html_url = latest_release.get("html_url", f"https://github.com/{GITHUB_USER}/{GITHUB_REPO}")
+
+                    if latest_version and latest_version != local_version:
+                        if messagebox.askyesno(
+                            "Update Available",
+                            f"A new version ({latest_version}) is available!\n\nDo you want to download it?"
+                        ):
+                            webbrowser.open(html_url)
+                    else:
+                        messagebox.showinfo("Update", "Your system is up to date!")
+                else:
+                    messagebox.showwarning("Update Check Failed", "Could not reach GitHub.")
+            except Exception as e:
+                messagebox.showerror("Error", f"Update check failed:\n{e}")
+
+        self.update_button = CTkButton(self.settings_frame, text="🔄",
             font=("Segoe UI", 15, "bold"), fg_color="#007bff",
             text_color="white", hover_color="#0056b3",
             height=25, width=7,
             command=open_update_link)
         self.update_button.place(x=640 // 2 - button_width // 2 + 50, y=275)
 
-        self.save_button = CTkButton(self.ui, text="💾", font=("Segoe UI", 15),
+        self.save_button = CTkButton(self.settings_frame, text="💾", font=("Segoe UI", 15),
                     fg_color="#28a745", text_color="white",
                     hover_color="#218838", height=25,width=7,
                     command=save)
         self.save_button.place(x=900 // 2 - button_width // 2, y=275)
 
-        self.back_button = CTkButton(self.ui, text="⮜ Go Back", font=("Segoe UI", 14, "bold"),
+        self.back_button = CTkButton(self.settings_frame, text="⮜ Go Back", font=("Segoe UI", 14, "bold"),
                                     fg_color="#6c757d", text_color="white",
-                                    hover_color="#5a6268",width=60,command=self.main_ui)
+                                    hover_color="#5a6268",width=60,command=lambda: self.show_frame(self.main_frame))
         self.back_button.place(y=12, x=20)
-            
-        self.exit_button = CTkButton(self.ui, text="  Exit ⮞  ", font=("Segoe UI", 14, "bold"),
+
+        self.exit_button = CTkButton(self.settings_frame, text="  Exit ⮞  ", font=("Segoe UI", 14, "bold"),
                                     fg_color="#28a745", text_color="white",
                                     hover_color="#218838", width=60,command=self.end_program)
-        self.exit_button.place(y=12, x=370) 
+        self.exit_button.place(y=12, x=370)
 
-        self.prevention_button = CTkButton(self.ui, text="🔇 OFF", font=("Segoe UI", 20, "bold"),
+        self.prevention_button = CTkButton(self.settings_frame, text="🔇 OFF", font=("Segoe UI", 20, "bold"),
                         fg_color="#dc3545", text_color="white",
                         hover_color="#c82333", height=50, width=90,
                         corner_radius=4, command=self.toggle_noise_prevention)
         self.prevention_button.place(y=87, x=350)
+
     def toggle_noise_prevention(self):
         if not hasattr(self, 'noise_prevention_active'):
             self.noise_prevention_active = False
         if not self.noise_prevention_active:
             self.noise_prevention_active = True
-            self.prevention_button.configure(text="🔇 ON", fg_color="#28a745", hover_color="#218838")
+            if getattr(self, "prevention_button", None):
+                self.prevention_button.configure(text="🔇 ON", fg_color="#28a745", hover_color="#218838")
             self.start_noise_monitoring()
         else:
             self.noise_prevention_active = False
-            self.prevention_button.configure(text="🔇 OFF", fg_color="#dc3545", hover_color="#c82333")
+            if getattr(self, "prevention_button", None):
+                self.prevention_button.configure(text="🔇 OFF", fg_color="#dc3545", hover_color="#c82333")
             self.stop_noise_monitoring()
-        # Save noise detector state
         self.save_settings()
 
     def start_noise_monitoring(self):
@@ -326,7 +451,8 @@ class AutoShutdownApp:
             from tkinter import messagebox
             messagebox.showerror("Missing Dependency", "Please install 'sounddevice' and 'numpy' to use noise prevention.\nRun: pip install sounddevice numpy")
             self.noise_prevention_active = False
-            self.prevention_button.configure(text="🔇 OFF", fg_color="#dc3545", hover_color="#c82333")
+            if getattr(self, "prevention_button", None):
+                self.prevention_button.configure(text="🔇 OFF", fg_color="#dc3545", hover_color="#c82333")
             return
         self._noise_monitoring = True
         self._noise_monitor_loop(sd, np)
@@ -334,17 +460,15 @@ class AutoShutdownApp:
     def _noise_monitor_loop(self, sd, np):
         if not getattr(self, 'noise_prevention_active', False):
             return
-        duration = 1 
-        threshold = 0.03 
+        duration = 1
+        threshold = 0.03
         fs = 44100
         try:
             recording = sd.rec(int(duration * fs), samplerate=fs, channels=1, dtype='float64')
             sd.wait()
- 
             volume_max = np.max(np.abs(recording))
             print(f"[DEBUG] Noise monitor: max amplitude = {volume_max}")
             if volume_max > threshold:
-
                 if not hasattr(self, '_noise_warning_shown') or not self._noise_warning_shown:
                     self._noise_warning_shown = True
                     from tkinter import messagebox
@@ -354,7 +478,8 @@ class AutoShutdownApp:
             from tkinter import messagebox
             messagebox.showerror("Error", f"Microphone error: {e}")
             self.noise_prevention_active = False
-            self.prevention_button.configure(text="🔇 OFF", fg_color="#dc3545", hover_color="#c82333")
+            if getattr(self, "prevention_button", None):
+                self.prevention_button.configure(text="🔇 OFF", fg_color="#dc3545", hover_color="#c82333")
             return
         if getattr(self, 'noise_prevention_active', False):
             self.ui.after(1200, lambda: self._noise_monitor_loop(sd, np))
@@ -363,68 +488,92 @@ class AutoShutdownApp:
         self._noise_monitoring = False
 
     def toggle_startup(self):
-        import sys
-        import os
+        # Only Windows startup integration is supported here
+        if os.name != 'nt':
+            messagebox.showwarning("Unsupported", "Startup integration is only supported on Windows.")
+            # revert to saved state if present
+            self.startup_var.set(startup_state.get("enabled", False))
+            return
+
         try:
             from win32com.client import Dispatch
         except ImportError:
             messagebox.showerror("Missing Dependency", "pywin32 is required for startup integration. Please install it with 'pip install pywin32'.")
+            # revert switch to saved state to avoid confusion
+            self.startup_var.set(startup_state.get("enabled", False))
             return
 
-        startup_folder = os.path.join(os.environ["APPDATA"], r"Microsoft\Windows\Start Menu\Programs\Startup")
+        startup_folder = os.path.join(os.environ.get("APPDATA", ""), r"Microsoft\Windows\Start Menu\Programs\Startup")
+        if not os.path.isdir(startup_folder):
+            messagebox.showerror("Startup Error", f"Startup folder not found: {startup_folder}")
+            self.startup_var.set(startup_state.get("enabled", False))
+            return
+
         shortcut_path = os.path.join(startup_folder, "AutoShutdown.lnk")
         script_path = os.path.abspath(sys.argv[0])
 
-        if self.startup_var.get():
+        try:
             shell = Dispatch('WScript.Shell')
-            shortcut = shell.CreateShortCut(shortcut_path)
-            shortcut.Targetpath = script_path
-            shortcut.WorkingDirectory = os.path.dirname(script_path)
-            shortcut.IconLocation = script_path
-            shortcut.save()
-            messagebox.showinfo("Startup", "App will start with Windows.")
-        else:
-            if os.path.exists(shortcut_path):
-                try:
-                    os.remove(shortcut_path)
-                    messagebox.showinfo("Startup", "App will NOT start with Windows.")
-                except Exception as e:
-                    messagebox.showerror("Startup", f"Failed to remove startup shortcut: {e}")
+            if self.startup_var.get():
+                shortcut = shell.CreateShortCut(shortcut_path)
+                # If running a .py file, point to python executable and pass the script in Arguments
+                if script_path.lower().endswith(".py"):
+                    shortcut.Targetpath = sys.executable
+                    shortcut.Arguments = f'"{script_path}"'
+                    shortcut.WorkingDirectory = os.path.dirname(script_path)
+                    shortcut.IconLocation = sys.executable
+                else:
+                    # assume exe or other executable
+                    shortcut.Targetpath = script_path
+                    shortcut.WorkingDirectory = os.path.dirname(script_path)
+                    shortcut.IconLocation = script_path
+                shortcut.save()
+                messagebox.showinfo("Startup", "App will start with Windows.")
             else:
-                messagebox.showinfo("Startup", "App will NOT start with Windows.")
-        # Save startup state
-        self.save_settings()
-
+                if os.path.exists(shortcut_path):
+                    try:
+                        os.remove(shortcut_path)
+                        messagebox.showinfo("Startup", "App will NOT start with Windows.")
+                    except Exception as e:
+                        messagebox.showerror("Startup", f"Failed to remove startup shortcut: {e}")
+                else:
+                    messagebox.showinfo("Startup", "App will NOT start with Windows.")
+            # persist the change in memory and in config
+            startup_state["enabled"] = self.startup_var.get()
+            self.save_settings()
+        except Exception as e:
+            messagebox.showerror("Startup Error", f"Failed to update startup shortcut: {e}")
+            # on failure revert the UI switch to previous state to avoid mismatches
+            self.startup_var.set(startup_state.get("enabled", False))
 
     def end_program(self):
-        self.mouse_listener.stop()
-        self.keyboard_listener.stop()
+        try:
+            self.mouse_listener.stop()
+            self.keyboard_listener.stop()
+        except Exception:
+            pass
         self.ui.destroy()
-        
+
     def check_pin(self):
         if self.pin_input.get() == pin_storage["main"]:
-            self.ui.after_cancel(self.pin_timer)
-            self.settings_ui()
+            # go to settings frame
+            self.show_frame(self.settings_frame)
         else:
             messagebox.showerror("Smart Shutdown", "Invalid PIN.")
 
     def main_ui(self):
-        for widget in self.ui.winfo_children():
-            widget.destroy()
-        self.center_window(window_width, window_height)
-        self.create_main_ui()
-        self.check_if_active()        
+        self.show_frame(self.main_frame)
+        self.check_if_active()
+
     def prevent_closing_app(self):
         messagebox.showinfo("You can't close this window!", "In Bisaya: Dili nimo pwede ma close salamat!")
-
-    def update_activity_time(self, *args):
-        self.last_activity_time = time.time()
-        self.update_time_label()
 
     def update_time_label(self):
         remaining_time = self.shutdown_time_ms - (time.time() - self.last_activity_time) * 1000
         minutes, seconds = divmod(int(remaining_time // 1000), 60)
-        self.time_label.config(text=f"{minutes:02}:{seconds:02}\n")
+        # ensure time_label exists
+        if getattr(self, "time_label", None):
+            self.time_label.config(text=f"{minutes:02}:{seconds:02}\n")
 
     def check_if_active(self):
         current_time = time.time()
@@ -434,7 +583,7 @@ class AutoShutdownApp:
             self.update_time_label()
             self.ui.after(1000, self.check_if_active)
 
-    def shutdown_computer(self):       
+    def shutdown_computer(self):
         os.system("shutdown /s /t 1")
 
 if __name__ == "__main__":

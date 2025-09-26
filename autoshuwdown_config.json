@@ -1,7 +1,7 @@
 {
-    "pin": "1234",
-    "message": "ILIHOK ANG MOUSE OR TOPLOKA ANG KEYBOARD PA~RA DILI MA PALONG!      BY: OWNER",
-    "timeout": 10,
+    "pin": "0000",
+    "message": "Welcome! Thank you for using Auto Shutdown. You can change this message in the settings anytime. The Default PIN is 0000",
+    "timeout": 20,
     "startup_enabled": false,
     "noise_detector_enabled": false
 }

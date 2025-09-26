@@ -1,5 +1,0 @@
-customtkinter
-pynput
-sounddevice
-numpy
-pywin32
